@@ -9,6 +9,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.PointF;
+import android.graphics.RectF;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.support.v4.view.ViewConfigurationCompat;
@@ -21,7 +22,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.animation.DecelerateInterpolator;
 
-import utils.BoundsF;
+import utils.CalcUtils;
 
 /**
  * ZoomImageView
@@ -31,7 +32,7 @@ import utils.BoundsF;
 public class ZoomImageView extends View {
 	public static final String TAG = "ZoomImageView";
 
-	public static final long ANIM_DURATION = 200;
+	public static final long ANIM_DURATION = 300;
 	public static final float MAX_SCALE = 4;
 	public static final float OVER_SCALE = 1f;
 
@@ -60,10 +61,17 @@ public class ZoomImageView extends View {
 	private float mMinScale = 1, mMaxScale = 1;
 	private float mOverScale = 0;
 
+	// scale
+	private RectF mTargetRect = new RectF();
+	private RectF mLimitRect = new RectF();
+	private RectF mCurrentRect = new RectF();
+
 	// image
 	private Matrix mMatrix = new Matrix();
+	private Matrix mTempMatrix = new Matrix(); // used for calc end value of animation.
 	private float[] mInitialValues = new float[9];
 	private float[] mCurrentValues = new float[9];
+	private float[] mTempValues = new float[9];
 	private float mCurrentImageWidth, mCurrentImageHeight;
 	private ValueAnimator mAnimator;
 
@@ -110,6 +118,7 @@ public class ZoomImageView extends View {
 		mMaxScale = MAX_SCALE;
 		mOverScale = OVER_SCALE;
 
+		setDrawingCacheEnabled(true);
 	}
 
 	public void setBitmap(Bitmap bitmap) {
@@ -125,6 +134,71 @@ public class ZoomImageView extends View {
 
 	public Bitmap getBitmap() {
 		return mBitmap;
+	}
+
+	private int getBitmapWidth() {
+		return mPresentBitmap.getWidth();
+	}
+
+	private int getBitmapHeight() {
+		return mPresentBitmap.getHeight();
+	}
+
+	private PointF getScalePivot(float scale, PointF pivot, RectF targetRect) {
+		updateValue();
+		mTempMatrix.set(mMatrix);
+
+		float diffScale = scale / mCurrentValues[Matrix.MSCALE_X];
+		if (pivot == null) {
+			pivot = new PointF();
+		}
+		mTempMatrix.postScale(diffScale, diffScale, pivot.x, pivot.y);
+		mTempMatrix.getValues(mTempValues);
+
+		float ctx = mCurrentValues[Matrix.MTRANS_X], cty = mCurrentValues[Matrix.MTRANS_Y];
+		float ttx = mTempValues[Matrix.MTRANS_X], tty = mTempValues[Matrix.MTRANS_Y];
+
+		RectF limit = getLimitBounds(scale);
+
+		if (ttx < limit.left) {
+			ttx = limit.left;
+		} else if (ttx > limit.right) {
+			ttx = limit.right;
+		}
+
+		if (tty < limit.top) {
+			tty = limit.top;
+		} else if (tty > limit.bottom) {
+			tty = limit.bottom;
+		}
+
+		if (targetRect != null) {
+			targetRect.set(ttx, tty, ttx + getBitmapWidth() * mTempValues[Matrix.MSCALE_X], tty + getBitmapHeight() * mTempValues[Matrix.MSCALE_Y]);
+		}
+
+		boolean fix = ttx != mTempValues[Matrix.MTRANS_X] || tty != mTempValues[Matrix.MTRANS_Y];
+
+		if (fix) {
+			float cw = getBitmapWidth() * mCurrentValues[Matrix.MSCALE_X];
+			float tw = cw * diffScale;
+			PointF p = CalcUtils.crossPointOfTwoLines(ctx, cty, ctx + cw, cty, ttx, tty, ttx + tw, tty);
+			pivot.set(p);
+		}
+
+		return new PointF(pivot.x, pivot.y);
+	}
+
+	private RectF getLimitBounds(float scale) {
+		float tw = scale * mPresentBitmap.getWidth();
+		float th = scale * mPresentBitmap.getHeight();
+
+		float left = tw >= mWidth ? mWidth - tw : (mWidth - tw) / 2;
+		float right = tw >= mWidth ? 0 : mWidth - (mWidth - tw) / 2 - tw;
+		float top = th >= mHeight ? mHeight - th : (mHeight - th) / 2;
+		float bottom = th >= mHeight ? 0 : mHeight - (mHeight - th) / 2 - th;
+
+		mLimitRect.set(left, top, right, bottom);
+		return mLimitRect;
 	}
 
 	@Override
@@ -144,7 +218,6 @@ public class ZoomImageView extends View {
 		super.onDraw(canvas);
 		if (mPresentBitmap != null) {
 			canvas.drawBitmap(mPresentBitmap, mMatrix, null);
-
 //			updateValue();
 
 //			Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -173,15 +246,22 @@ public class ZoomImageView extends View {
 
 	@Override
 	public boolean onTouchEvent(MotionEvent event) {
+		int action = event.getActionMasked();
 		if (mAnimator != null && mAnimator.isRunning()) {
-			return true;
+			Log.d(TAG, "ANIMATING IGNORE");
+//			return true;
+			if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+				mAnimator.cancel();
+			} else {
+				return false;
+			}
 		}
 
 		if (!mScrollerCompat.isFinished()) {
+			Log.d(TAG, "ABORT SCROLL");
 			mScrollerCompat.abortAnimation();
 		}
 
-		int action = event.getActionMasked();
 
 		float x = event.getX();
 		float y = event.getY();
@@ -194,6 +274,7 @@ public class ZoomImageView extends View {
 
 		switch (action) {
 			case MotionEvent.ACTION_DOWN:
+				Log.d(TAG, "ACTION_DOWN");
 				mStartPointF.set(x, y);
 				mLastPointF.set(mStartPointF);
 
@@ -205,6 +286,7 @@ public class ZoomImageView extends View {
 
 				break;
 			case MotionEvent.ACTION_POINTER_DOWN: {
+				Log.d(TAG, "ACTION_POINTER_DOWN");
 				int pointCount = event.getPointerCount();
 				if (pointCount == 2) {
 					mPinching = true;
@@ -223,6 +305,7 @@ public class ZoomImageView extends View {
 			break;
 
 			case MotionEvent.ACTION_MOVE: {
+				Log.d(TAG, "ACTION_MOVE");
 				int index0 = event.findPointerIndex(mTouchFirstPointId);
 				int index1 = event.findPointerIndex(mTouchSecondPointId);
 				int pointCount = event.getPointerCount();
@@ -253,6 +336,7 @@ public class ZoomImageView extends View {
 			}
 			break;
 			case MotionEvent.ACTION_POINTER_UP:
+				Log.d(TAG, "ACTION_POINTER_UP");
 				// leave just one
 				int id = event.getPointerId(event.getActionIndex());
 				if (mPinching && (id == mTouchFirstPointId || id == mTouchSecondPointId)) {
@@ -263,7 +347,9 @@ public class ZoomImageView extends View {
 				}
 				break;
 			case MotionEvent.ACTION_UP:
+				Log.d(TAG, "ACTION_UP");
 			case MotionEvent.ACTION_CANCEL:
+				Log.d(TAG, "ACTION_CANCEL");
 				mLastPointF.set(-1, -1);
 				if (!mPinching && event.getEventTime() - event.getDownTime() < mTapTimeout && Math.abs(x - mStartPointF.x) < mTouchSlop && Math.abs(y - mStartPointF.y) < mTouchSlop) {
 					// tap
@@ -287,8 +373,8 @@ public class ZoomImageView extends View {
 				mVelocityTracker.computeCurrentVelocity(1000);
 				float vx = mVelocityTracker.getXVelocity();
 				float vy = mVelocityTracker.getYVelocity();
-				BoundsF boundsF = getLimitBounds();
-				mScrollerCompat.fling((int) mCurrentValues[Matrix.MTRANS_X], (int) mCurrentValues[Matrix.MTRANS_Y], (int) vx, (int) vy, (int) boundsF.getLeft(), (int) boundsF.getRight(), (int) boundsF.getTop(), (int) boundsF.getBottom());
+				RectF limit = getLimitBounds();
+				mScrollerCompat.fling((int) mCurrentValues[Matrix.MTRANS_X], (int) mCurrentValues[Matrix.MTRANS_Y], (int) vx, (int) vy, (int) limit.left, (int) limit.right, (int) limit.top, (int) limit.bottom);
 				mVelocityTracker.clear();
 				mVelocityTracker.recycle();
 				mVelocityTracker = null;
@@ -301,37 +387,17 @@ public class ZoomImageView extends View {
 	@Override
 	public void computeScroll() {
 		if (mScrollerCompat.computeScrollOffset()) {
-			Log.d(TAG, "computeScroll: " + mScrollerCompat.getCurrX() + "  y: " + mScrollerCompat.getCurrY());
-			BoundsF boundsF = getLimitBounds();
-			float x = mScrollerCompat.getCurrX(), y = mScrollerCompat.getCurrY();
+			PointF point = limit(mScrollerCompat.getCurrX(), mScrollerCompat.getCurrY());
 
-			boolean limitX = false, limitY = false;
-
-			if (x < boundsF.getLeft()) {
-				x = boundsF.getLeft();
-				limitX = true;
-			} else if (x > boundsF.getRight()) {
-				x = boundsF.getRight();
-				limitX = true;
-			}
-
-			if (y < boundsF.getTop()) {
-				y = boundsF.getTop();
-				limitY = true;
-			} else if (y > boundsF.getBottom()) {
-				y = boundsF.getBottom();
-				limitY = true;
-			}
-
-			float dx = x - mCurrentValues[Matrix.MTRANS_X], dy = y - mCurrentValues[Matrix.MTRANS_Y];
-			if (limitX && limitY) {
+			float dx = point.x - mCurrentValues[Matrix.MTRANS_X], dy = point.y - mCurrentValues[Matrix.MTRANS_Y];
+			if (point.x != mScrollerCompat.getCurrX() && point.y != mScrollerCompat.getCurrY()) {
 				mScrollerCompat.abortAnimation();
 				return;
 			}
 
 			mMatrix.postTranslate(dx, dy);
+			postInvalidate();
 		}
-		postInvalidate();
 	}
 
 	private float distance(float x1, float y1, float x2, float y2) {
@@ -346,9 +412,13 @@ public class ZoomImageView extends View {
 			return;
 		}
 		mMatrix.getValues(mCurrentValues);
+		mCurrentRect.set(mCurrentValues[Matrix.MTRANS_X],
+				mCurrentValues[Matrix.MTRANS_Y],
+				getBitmapWidth() * mCurrentValues[Matrix.MSCALE_X],
+				getBitmapHeight() * mCurrentValues[Matrix.MSCALE_X]);
 	}
 
-	private BoundsF getLimitBounds() {
+	private RectF getLimitBounds() {
 		updateValue();
 		float tw = mCurrentValues[Matrix.MSCALE_X] * mPresentBitmap.getWidth();
 		float th = mCurrentValues[Matrix.MSCALE_Y] * mPresentBitmap.getHeight();
@@ -358,26 +428,36 @@ public class ZoomImageView extends View {
 		float top = th >= mHeight ? mHeight - th : (mHeight - th) / 2;
 		float bottom = th >= mHeight ? 0 : mHeight - (mHeight - th) / 2 - th;
 
-		return new BoundsF(left, top, right, bottom);
+		return new RectF(left, top, right, bottom);
+	}
+
+	private PointF limit(float x, float y) {
+		RectF limit = getLimitBounds();
+		PointF point = new PointF(x, y);
+
+		if (point.x < limit.left) {
+			point.x = limit.left;
+		} else if (point.x > limit.right) {
+			point.x = limit.right;
+		}
+
+		if (point.y < limit.top) {
+			point.y = limit.top;
+		} else if (point.y > limit.bottom) {
+			point.y = limit.bottom;
+		}
+		return point;
 	}
 
 	private boolean move(float dx, float dy) {
-		BoundsF boundsF = getLimitBounds();
+		updateValue();
 		float tx = mCurrentValues[Matrix.MTRANS_X] + dx;
 		float ty = mCurrentValues[Matrix.MTRANS_Y] + dy;
 
+		PointF targetPoint = limit(tx, ty);
 
-		if (tx < boundsF.getLeft()) {
-			dx = boundsF.getLeft() - mCurrentValues[Matrix.MTRANS_X];
-		} else if (tx > boundsF.getRight()) {
-			dx = boundsF.getRight() - mCurrentValues[Matrix.MTRANS_X];
-		}
-
-		if (ty < boundsF.getTop()) {
-			dy = boundsF.getTop() - mCurrentValues[Matrix.MTRANS_Y];
-		} else if (ty > boundsF.getBottom()) {
-			dy = boundsF.getBottom() - mCurrentValues[Matrix.MTRANS_Y];
-		}
+		dx = targetPoint.x - mCurrentValues[Matrix.MTRANS_X];
+		dy = targetPoint.y - mCurrentValues[Matrix.MTRANS_Y];
 
 		if (dx == 0 && dy == 0) {
 			return false;
@@ -444,61 +524,29 @@ public class ZoomImageView extends View {
 		updateValue();
 
 		float currentScale = mCurrentValues[Matrix.MSCALE_X];
-		float diffScale = 1;
 		float ts = currentScale;
 		if (currentScale < mMinScale) {
 			ts = mMinScale;
 		} else if (currentScale > mMaxScale) {
 			ts = mMaxScale;
 		}
-		diffScale = ts / currentScale;
 
-		float cl = mCurrentValues[Matrix.MTRANS_X];
-		float ct = mCurrentValues[Matrix.MTRANS_Y];
-		float cw = mCurrentValues[Matrix.MSCALE_X] * mPresentBitmap.getWidth();
-
-		float tw = cw * diffScale;
-		float th = mCurrentValues[Matrix.MSCALE_Y] * mPresentBitmap.getHeight() * diffScale;
-
-		float tl = diffScale >= 1 ? cl * diffScale : mWidth / 2 - (mWidth / 2 - cl) * diffScale;
-		float tt = diffScale >= 1 ? ct * diffScale : mWidth / 2 - (mWidth / 2 - ct) * diffScale;
-
-		float left = tw >= mWidth ? mWidth - tw : (mWidth - tw) / 2;
-		float right = tw >= mWidth ? 0 : mWidth - (mWidth - tw) / 2 - tw;
-		float top = th >= mHeight ? mHeight - th : (mHeight - th) / 2;
-		float bottom = th >= mHeight ? 0 : mHeight - (mHeight - th) / 2 - th;
-
-		float tx = tl, ty = tt;
-
-		if (tl < left) {
-			tx = left;
-		} else if (tl > right) {
-			tx = right;
-		}
-
-		if (tt < top) {
-			ty = top;
-		} else if (tt > bottom) {
-			ty = bottom;
-		}
+		PointF p = getScalePivot(ts, mScaleCurrentPivot, mTargetRect);
 
 		// no need to animate
-		if (tl == tx && tt == ty && diffScale == 1) {
+		if (mTargetRect.left == mCurrentValues.length && mTargetRect.top == mCurrentRect.top && ts == currentScale) {
 			return null;
 		}
 
-		ValueAnimator animator = ValueAnimator.ofInt(0, 100);
-		animator.setDuration(ANIM_DURATION);
+		ValueAnimator animator = createAnimator(null);
 
-		if (diffScale == 1) {
+		if (ts == currentScale) {
 			// just translation
-			animator.addUpdateListener(new LimitBoundsAnimatorListener(cl, ct, tx, ty, true));
+			animator.addUpdateListener(new LimitBoundsAnimatorListener(mCurrentRect.left, mCurrentRect.top, mTargetRect.left, mTargetRect.top, true));
 		} else {
 			// when diffScale != 1, scale by (x0, y0) to translate image to target position
-			PointF p = crossPointOfTwoLines(cl, ct, cl + cw, ct, tx, ty, tx + tw, ty);
-
 			animator.addUpdateListener(new LimitBoundsAnimatorListener(currentScale, ts, p.x, p.y));
-			if (diffScale > 1) {
+			if (ts > currentScale) {
 				animator.addListener(new AnimatorListenerAdapter() {
 					@Override
 					public void onAnimationEnd(Animator animation) {
@@ -511,51 +559,15 @@ public class ZoomImageView extends View {
 		return animator;
 	}
 
-	private PointF crossPointOfTwoLines(float x1, float y1, float x2, float y2, float m1, float n1, float m2, float n2) {
-		float a1 = 0, b1 = 0, a2 = 0, b2 = 0;
-		float x0 = 0, y0 = 0;
-
-		if (m1 == x1) {
-			x0 = x1;
-		} else {
-			a1 = (n1 - y1) / (m1 - x1);
-			b1 = n1 - a1 * m1;
-		}
-
-		if (m2 == x2) {
-			x0 = x2;
-		} else {
-			a2 = (n2 - y2) / (m2 - x2);
-			b2 = n2 - a2 * m2;
-		}
-
-		if (x0 != x1 && x0 != x2) {
-			if (a2 == a1) {
-				x0 = 0;
-			} else {
-				x0 = (b1 - b2) / (a2 - a1);
-			}
-		}
-
-		if (x0 == x1) {
-			y0 = a2 * x0 + b2;
-		} else {
-			y0 = a1 * x0 + b1;
-		}
-		return new PointF(x0, y0);
-	}
-
-	public void testMove() {
-		mMatrix.postScale(0.5f, 0.5f, 0, 0);
-		mMatrix.postTranslate(50, 0);
-	}
-
 	private ValueAnimator buildScaleAnimator(float ex, float ey, ScaleLevel level) {
 		updateValue();
 		float currentScale = mCurrentValues[Matrix.MSCALE_X];
 		float scale = currentScale;
 
 		switch (level) {
+			case PTD:
+				scale = Math.min(2, getResources().getDisplayMetrics().density);
+				break;
 			case PTP:
 				scale = 1;
 				break;
@@ -571,7 +583,6 @@ public class ZoomImageView extends View {
 				break;
 		}
 
-		Log.d(TAG, "current scale: " + currentScale + "  scale: " + scale);
 		if (Math.abs(scale - currentScale) < 0.01) { // forbid double ex
 			ScaleLevel next = level.next();
 			if (mTempScaleLevel == null) {
@@ -583,16 +594,25 @@ public class ZoomImageView extends View {
 		}
 		mTempScaleLevel = null;
 
-		ValueAnimator.AnimatorUpdateListener listener = new ScaleAnimatorListener(mCurrentValues[Matrix.MSCALE_X], scale, ex, ey);
-
 		if (mCurrentValues[Matrix.MSCALE_X] == scale) {
 			return null;
 		}
 
+		float px = ex, py = ey;
+
+		PointF p = getScalePivot(scale, new PointF(px, py), null);
+		px = p.x;
+		py = p.y;
+
+		return createAnimator(new ScaleAnimatorListener(mCurrentValues[Matrix.MSCALE_X], scale, px, py));
+	}
+
+	private ValueAnimator createAnimator(ValueAnimator.AnimatorUpdateListener listener) {
 		ValueAnimator animator = ValueAnimator.ofInt(0, 100);
 		animator.setDuration(ANIM_DURATION);
-		animator.addUpdateListener(listener);
-
+		if (listener != null) {
+			animator.addUpdateListener(listener);
+		}
 		return animator;
 	}
 
@@ -636,9 +656,15 @@ public class ZoomImageView extends View {
 		PTP {
 			@Override
 			ScaleLevel next() {
+				return PTD;
+			}
+		}, // pixel to pixel
+		PTD {
+			@Override
+			ScaleLevel next() {
 				return FIT_IN;
 			}
-		}; // pixel to pixel
+		}; // pixel to dp
 
 		abstract ScaleLevel next();
 	}
@@ -747,7 +773,12 @@ public class ZoomImageView extends View {
 
 			mLastScale = scale;
 			mCurrentScale = scale;
-			move(0, 0);
+
+			if (fraction == 1) {
+				Log.w(TAG, "matx: " + mMatrix);
+			}
+
+			invalidate();
 		}
 	}
 }

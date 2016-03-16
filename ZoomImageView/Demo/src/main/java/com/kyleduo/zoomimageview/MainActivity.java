@@ -23,6 +23,7 @@ public class MainActivity extends AppCompatActivity {
 		mZoomIV = (ZoomImageView) findViewById(R.id.zoom_iv);
 
 		mZoomIV.setBitmap(getImageFromAssetsFile("demo.jpg"));
+//		mZoomIV.setBitmap(getImageFromAssetsFile("large.jpg"));
 	}
 
 	private Bitmap getImageFromAssetsFile(String fileName) {
