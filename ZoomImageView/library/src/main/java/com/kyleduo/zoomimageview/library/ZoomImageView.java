@@ -22,7 +22,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.animation.DecelerateInterpolator;
 
-import utils.CalcUtils;
+import com.kyleduo.zoomimageview.library.utils.CalcUtils;
 
 /**
  * ZoomImageView

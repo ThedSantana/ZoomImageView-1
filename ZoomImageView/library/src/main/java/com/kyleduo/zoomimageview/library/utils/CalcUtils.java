@@ -1,4 +1,4 @@
-package utils;
+package com.kyleduo.zoomimageview.library.utils;
 
 import android.graphics.PointF;
 
